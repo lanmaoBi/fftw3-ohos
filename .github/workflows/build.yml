@@ -1,4 +1,4 @@
-name: Build FFTW3 for HarmonyOS (Stable)
+name: Build FFTW3 for HarmonyOS (Docker)
 
 on:
   push:
@@ -13,126 +13,53 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     
-    - name: Download OHOS NDK (GitHub Mirror)
+    - name: Build in Docker
       run: |
-        sudo apt-get update
-        sudo apt-get install -y wget unzip
-        
-        echo "📥 Downloading NDK from GitHub mirror..."
-        # 使用 GitHub 托管的备份（约 500MB，只包含必要文件）
-        wget -q --show-progress \
-          https://github.com/eclipse-oniro-mirrors/arkcompiler_ets_runtime/releases/download/OpenHarmony-v4.0-Release/native-linux-x64-4.0.10.5-Release.zip \
-          -O /tmp/native-sdk.zip
-        
-        echo "📦 Extracting NDK..."
-        mkdir -p $HOME/ohos-ndk
-        unzip -q /tmp/native-sdk.zip -d $HOME/ohos-ndk
-        
-        echo "🔍 NDK structure:"
-        ls -la $HOME/ohos-ndk/
-        find $HOME/ohos-ndk -name "clang" -type f
-        
-    - name: Setup Toolchain
-      run: |
-        # 查找 clang
-        CLANG_PATH=$(find $HOME/ohos-ndk -name "clang" -type f -path "*/bin/clang" | head -1)
-        
-        if [ -z "$CLANG_PATH" ]; then
-          echo "❌ Clang not found!"
-          exit 1
-        fi
-        
-        echo "✅ Clang: $CLANG_PATH"
-        LLVM_BIN=$(dirname $CLANG_PATH)
-        echo "LLVM_BIN=$LLVM_BIN" >> $GITHUB_ENV
-        
-        $CLANG_PATH --version
-        
-    - name: Download FFTW3
-      run: |
-        wget http://www.fftw.org/fftw-3.3.10.tar.gz
-        tar -xzf fftw-3.3.10.tar.gz
-        
-    - name: Build FFTW3
-      run: |
-        cd fftw-3.3.10
-        
-        export CC="$LLVM_BIN/clang"
-        export CXX="$LLVM_BIN/clang++"
-        export AR="$LLVM_BIN/llvm-ar"
-        export RANLIB="$LLVM_BIN/llvm-ranlib"
-        
-        export CFLAGS="--target=aarch64-linux-ohos -fPIC -O3"
-        export CXXFLAGS="--target=aarch64-linux-ohos -fPIC -O3"
-        export LDFLAGS="--target=aarch64-linux-ohos"
-        
-        ./configure \
-          --host=aarch64-linux-ohos \
-          --prefix=$HOME/fftw3-install \
-          --enable-shared \
-          --enable-float \
-          --enable-threads \
-          --disable-fortran
-          
-        make -j$(nproc)
-        make install
-        
-    - name: Verify Build
-      run: |
-        echo "📊 Build Results:"
-        ls -lh $HOME/fftw3-install/lib/
-        file $HOME/fftw3-install/lib/libfftw3f.so
-        readelf -d $HOME/fftw3-install/lib/libfftw3f.so | grep NEEDED || true
-        
-    - name: Package files
-      run: |
-        mkdir -p output
-        cp $HOME/fftw3-install/lib/libfftw3f.so output/
-        cp $HOME/fftw3-install/include/fftw3.h output/
-        
-        cat > output/README.md << 'EOF'
-        # FFTW3 for HarmonyOS (ARM64)
+        # 创建 Dockerfile
+        cat > Dockerfile << 'EOF'
+        FROM ubuntu:22.04
 
-        ## 使用方法
+        # 安装基础工具
+        RUN apt-get update && apt-get install -y \
+            wget build-essential cmake git \
+            clang-15 lld-15
 
-        ### 1. 集成到鸿蒙项目
-        ```bash
-        # 复制到项目
-        cp libfftw3f.so your_project/entry/libs/arm64-v8a/
-        ```
+        # 下载 FFTW3
+        RUN wget http://www.fftw.org/fftw-3.3.10.tar.gz && \
+            tar -xzf fftw-3.3.10.tar.gz
 
-        ### 2. CMakeLists.txt 配置
-        ```cmake
-        add_library(fftw3f SHARED IMPORTED)
-        set_target_properties(fftw3f PROPERTIES
-            IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/../libs/arm64-v8a/libfftw3f.so
-        )
-        target_link_libraries(entry PUBLIC fftw3f)
-        ```
+        # 编译
+        WORKDIR /fftw-3.3.10
+        RUN CC=clang-15 \
+            CXX=clang++-15 \
+            CFLAGS="--target=aarch64-linux-gnu -fPIC -O3" \
+            LDFLAGS="--target=aarch64-linux-gnu" \
+            ./configure \
+              --host=aarch64-linux-gnu \
+              --prefix=/output \
+              --enable-shared \
+              --enable-float \
+              --enable-threads \
+              --disable-fortran && \
+            make -j$(nproc) && \
+            make install
 
-        ### 3. 代码示例
-        ```cpp
-        #include "fftw3.h"
-
-        void doFFT() {
-            int N = 1024;
-            fftwf_complex *in = fftwf_malloc(sizeof(fftwf_complex) * N);
-            fftwf_complex *out = fftwf_malloc(sizeof(fftwf_complex) * N);
-            
-            fftwf_plan plan = fftwf_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
-            fftwf_execute(plan);
-            
-            fftwf_destroy_plan(plan);
-            fftwf_free(in);
-            fftwf_free(out);
-        }
-        ```
+        WORKDIR /output
         EOF
+        
+        # 构建
+        docker build -t fftw-builder .
+        
+        # 复制产物
+        docker create --name temp fftw-builder
+        docker cp temp:/output/lib/libfftw3f.so output/
+        docker cp temp:/output/include/fftw3.h output/
+        docker rm temp
         
         ls -lh output/
         
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: fftw3-harmonyos-arm64
+        name: fftw3-harmonyos
         path: output/*
