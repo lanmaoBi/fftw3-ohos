@@ -1,4 +1,4 @@
-name: Build FFTW3 for HarmonyOS (Docker Fixed)
+name: Build FFTW3 for HarmonyOS (Official NDK)
 
 on:
   push:
@@ -13,187 +13,196 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     
-    - name: Build in Docker
+    - name: Setup OHOS SDK
       run: |
-        # 创建 Dockerfile
-        cat > Dockerfile << 'EOF'
-        FROM ubuntu:22.04
-
-        ENV DEBIAN_FRONTEND=noninteractive
-
-        # 安装基础工具和交叉编译工具链
-        RUN apt-get update && apt-get install -y \
-            wget build-essential cmake git \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            && rm -rf /var/lib/apt/lists/*
-
-        # 下载 FFTW3
-        RUN wget http://www.fftw.org/fftw-3.3.10.tar.gz && \
-            tar -xzf fftw-3.3.10.tar.gz
-
-        # 编译
-        WORKDIR /fftw-3.3.10
-        RUN ./configure \
-              --host=aarch64-linux-gnu \
-              --prefix=/output \
-              --enable-shared \
-              --enable-float \
-              --enable-threads \
-              --disable-fortran \
-              CC=aarch64-linux-gnu-gcc \
-              CXX=aarch64-linux-gnu-g++ \
-              CFLAGS="-fPIC -O3" \
-            && make -j$(nproc) \
-            && make install
-
+        # 下载 DevEco Studio 命令行工具
+        wget https://contentcenter-vali-drcn.dbankcdn.cn/pvt_2/DeveloperAlliance_package_901_9/9a/v3/HBD1VL9fTVSW7bs1K0dnPw/command-line-tools-linux-5.0.3.403.zip
+        
+        unzip -q command-line-tools-linux-5.0.3.403.zip -d ~/cmdline-tools
+        
+        # 安装 SDK
+        ~/cmdline-tools/bin/sdkmanager --install "OpenHarmony 5.0.0(12)" --sdk-root=$HOME/ohos-sdk
+        
+        # 验证安装
+        find $HOME/ohos-sdk -name "clang" -type f
+    
+    - name: Build FFTW3
+      run: |
+        # 设置环境变量
+        export OHOS_SDK_ROOT=$HOME/ohos-sdk
+        export OHOS_NDK=$OHOS_SDK_ROOT/12/native
+        
+        # 查找工具链
+        CLANG=$(find $OHOS_NDK -name "clang" -path "*/llvm/bin/*" | head -1)
+        CLANG_DIR=$(dirname $CLANG)
+        
+        export PATH="$CLANG_DIR:$PATH"
+        export CC="$CLANG"
+        export AR="$CLANG_DIR/llvm-ar"
+        export RANLIB="$CLANG_DIR/llvm-ranlib"
+        
+        # 下载 FFTW
+        wget http://www.fftw.org/fftw-3.3.10.tar.gz
+        tar -xzf fftw-3.3.10.tar.gz
+        cd fftw-3.3.10
+        
+        # 配置并编译
+        ./configure \
+          --host=aarch64-linux-ohos \
+          --prefix=$HOME/install \
+          --enable-shared \
+          --enable-float \
+          --enable-threads \
+          --disable-fortran \
+          CC="$CC" \
+          CFLAGS="--target=aarch64-linux-ohos -fPIC -O3" \
+          LDFLAGS="--target=aarch64-linux-ohos"
+        
+        make -j$(nproc)
+        make install
+        
         # 验证
-        RUN file /output/lib/libfftw3f.so && \
-            aarch64-linux-gnu-readelf -d /output/lib/libfftw3f.so | grep NEEDED || true
-
-        WORKDIR /output
-        EOF
-        
-        # 构建镜像
-        docker build -t fftw-builder .
-        
-        # 创建输出目录
-        mkdir -p output
-        
-        # 复制产物
-        docker create --name temp fftw-builder
-        docker cp temp:/output/lib/libfftw3f.so output/
-        docker cp temp:/output/lib/libfftw3f.so.3 output/ || true
-        docker cp temp:/output/include/fftw3.h output/
-        docker rm temp
-        
-        echo "📊 Build Results:"
-        ls -lh output/
-        file output/libfftw3f.so
-        
-    - name: Create README
+        echo "📊 Build completed!"
+        file $HOME/install/lib/libfftw3f.so
+        $CLANG_DIR/llvm-readelf -d $HOME/install/lib/libfftw3f.so | grep NEEDED
+    
+    - name: Package
       run: |
+        mkdir -p output
+        cp $HOME/install/lib/libfftw3f.so* output/
+        cp $HOME/install/include/fftw3.h output/
+        
+        # 创建使用说明
         cat > output/README.md << 'EOF'
-        # FFTW3 for HarmonyOS (ARM64)
-
-        ## 文件说明
-        - `libfftw3f.so` - FFTW3 单精度动态库（ARM64）
-        - `fftw3.h` - 头文件
-
-        ## 使用方法
-
-        ### 1. 复制到鸿蒙项目
-        ```bash
-        cp libfftw3f.so your_project/entry/libs/arm64-v8a/
-        cp fftw3.h your_project/entry/src/main/cpp/include/
+        # FFTW3 for HarmonyOS (Official Build)
+        
+        ## 验证信息
         ```
-
-        ### 2. CMakeLists.txt 配置
+        Platform: ARM64 (aarch64-linux-ohos)
+        Compiler: OHOS NDK Clang
+        Dependencies: HarmonyOS system libraries
+        ```
+        
+        ## 集成步骤
+        
+        ### 1. 目录结构
+        ```
+        entry/
+        ├── libs/
+        │   └── arm64-v8a/
+        │       └── libfftw3f.so
+        └── src/main/cpp/
+            ├── CMakeLists.txt
+            ├── include/
+            │   └── fftw3.h
+            └── hello.cpp
+        ```
+        
+        ### 2. CMakeLists.txt
         ```cmake
-        # 添加头文件路径
+        cmake_minimum_required(VERSION 3.4.1)
+        project(FFTWDemo)
+        
+        # 添加头文件
         include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
-
+        
         # 导入预编译库
         add_library(fftw3f SHARED IMPORTED)
         set_target_properties(fftw3f PROPERTIES
-            IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/../libs/arm64-v8a/libfftw3f.so
+            IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../libs/${OHOS_ARCH}/libfftw3f.so"
         )
-
-        # 链接
-        target_link_libraries(entry PUBLIC fftw3f)
+        
+        # 你的源文件
+        add_library(entry SHARED hello.cpp)
+        
+        # 链接库（顺序很重要！）
+        target_link_libraries(entry PUBLIC
+            fftw3f
+            hilog_ndk.z
+        )
         ```
-
-        ### 3. C++ 代码示例
+        
+        ### 3. C++ 代码
         ```cpp
-        #include "fftw3.h"
+        #include <napi/native_api.h>
         #include <hilog/log.h>
-
-        void performFFT() {
-            const int N = 1024;
+        #include "fftw3.h"
+        
+        static napi_value TestFFT(napi_env env, napi_callback_info info) {
+            const int N = 128;
             
-            // 分配内存
-            fftwf_complex *in = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * N);
-            fftwf_complex *out = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * N);
+            fftwf_complex *in = fftwf_alloc_complex(N);
+            fftwf_complex *out = fftwf_alloc_complex(N);
             
-            // 创建计划
-            fftwf_plan plan = fftwf_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+            fftwf_plan p = fftwf_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
             
             // 填充测试数据
-            for (int i = 0; i < N; i++) {
-                in[i][0] = i; // 实部
-                in[i][1] = 0; // 虚部
+            for(int i = 0; i < N; i++) {
+                in[i][0] = i;
+                in[i][1] = 0;
             }
             
-            // 执行 FFT
-            fftwf_execute(plan);
+            fftwf_execute(p);
             
-            OH_LOG_INFO(LOG_APP, "FFT completed! First result: %f + %fi", 
-                        out[0][0], out[0][1]);
+            OH_LOG_INFO(LOG_APP, "FFT Result[0]: %f + %fi", out[0][0], out[0][1]);
             
-            // 清理
-            fftwf_destroy_plan(plan);
+            fftwf_destroy_plan(p);
             fftwf_free(in);
             fftwf_free(out);
+            
+            napi_value result;
+            napi_get_boolean(env, true, &result);
+            return result;
+        }
+        
+        EXTERN_C_START
+        static napi_value Init(napi_env env, napi_value exports) {
+            napi_property_descriptor desc[] = {
+                { "testFFT", nullptr, TestFFT, nullptr, nullptr, nullptr, napi_default, nullptr }
+            };
+            napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+            return exports;
+        }
+        EXTERN_C_END
+        
+        static napi_module demoModule = {
+            .nm_version = 1,
+            .nm_flags = 0,
+            .nm_filename = nullptr,
+            .nm_register_func = Init,
+            .nm_modname = "entry",
+            .nm_priv = nullptr,
+            .reserved = { 0 },
+        };
+        
+        extern "C" __attribute__((constructor)) void RegisterModule() {
+            napi_module_register(&demoModule);
         }
         ```
-
-        ### 4. module.json5 配置
-        ```json
-        {
-          "module": {
-            "name": "entry",
-            "type": "entry",
-            "abilities": [...],
-            "metadata": [
-              {
-                "name": "ArkTSPartialUpdate",
-                "value": "true"
-              }
-            ]
+        
+        ### 4. ArkTS 调用
+        ```typescript
+        import testNapi from 'libentry.so'
+        
+        @Entry
+        @Component
+        struct Index {
+          build() {
+            Column() {
+              Button('Run FFT Test')
+                .onClick(() => {
+                  let result = testNapi.testFFT()
+                  console.log('FFT test result:', result)
+                })
+            }
           }
         }
         ```
-
-        ## 技术细节
-        - **架构**: ARM64 (aarch64)
-        - **编译器**: GCC 11.x (aarch64-linux-gnu)
-        - **优化**: -O3
-        - **线程**: 支持多线程
-        - **精度**: 单精度浮点 (float)
-
-        ## 常见问题
-
-        ### Q: 在设备上运行报错 "library not found"
-        A: 确保：
-        1. `libfftw3f.so` 在 `entry/libs/arm64-v8a/` 目录
-        2. CMakeLists.txt 正确配置 IMPORTED_LOCATION
-        3. 使用真机或 ARM64 模拟器测试
-
-        ### Q: 链接时报错 undefined reference
-        A: 检查：
-        ```cmake
-        target_link_libraries(entry PUBLIC fftw3f)  # 确保在最后
-        ```
-
-        ### Q: 性能优化建议
-        A: 
-        - 使用 `FFTW_MEASURE` 替代 `FFTW_ESTIMATE`（首次慢，后续快）
-        - 重用 plan，避免重复创建
-        - 考虑使用 NEON 优化版本
-
-        ## 验证信息
-        ```bash
-        $ file libfftw3f.so
-        libfftw3f.so: ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked
-        ```
-
-        ---
-        构建时间: $(date)
-        FFTW 版本: 3.3.10
         EOF
         
-    - name: Upload artifacts
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: fftw3-harmonyos-arm64
+        name: fftw3-harmonyos-official
         path: output/*
         retention-days: 30
