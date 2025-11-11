@@ -13,21 +13,51 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     
-    - name: Setup Build Environment
+    - name: Download OHOS NDK (Fixed)
       run: |
+        # 安装 aria2 加速下载
         sudo apt-get update
-        sudo apt-get install -y wget unzip build-essential
-    
-    - name: Download OHOS NDK (Optimized)
-      run: |
-        # 使用 aria2 多线程下载加速
-        sudo apt-get install -y aria2
-        aria2c -x 16 -s 16 https://repo.huaweicloud.com/openharmony/os/5.0-Release/ohos-sdk-windows_linux-public.tar.gz
+        sudo apt-get install -y aria2 p7zip-full
         
-        echo "Extracting NDK..."
+        # 多线程下载 NDK
+        aria2c -x 16 -s 16 \
+          https://repo.huaweicloud.com/openharmony/os/5.0-Release/ohos-sdk-windows_linux-public.tar.gz
+        
+        # 解压并检查目录结构
+        echo "Extracting main archive..."
         tar -xzf ohos-sdk-windows_linux-public.tar.gz
-        cd ohos-sdk/linux
-        unzip -q native-linux-x64-5.0.0.66-Release.zip -d $HOME/ohos-sdk
+        
+        # 查看解压后的文件
+        echo "=== Checking extracted files ==="
+        ls -la
+        
+        # 查找 native SDK
+        echo "=== Finding native SDK ==="
+        find . -name "*native*" -type f
+        
+        # 解压 native SDK（根据实际文件名）
+        if [ -f "ohos-sdk/linux/native-linux-x64-5.0.0.66-Release.zip" ]; then
+          echo "Extracting native SDK..."
+          unzip -q ohos-sdk/linux/native-linux-x64-5.0.0.66-Release.zip -d $HOME/ohos-sdk
+        elif [ -f "linux/native-linux-x64-5.0.0.66-Release.zip" ]; then
+          echo "Extracting native SDK (alternative path)..."
+          unzip -q linux/native-linux-x64-5.0.0.66-Release.zip -d $HOME/ohos-sdk
+        else
+          # 查找所有 zip 文件
+          echo "Finding all zip files..."
+          find . -name "*.zip" -type f
+          # 解压第一个找到的 native zip
+          NATIVE_ZIP=$(find . -name "*native*.zip" | head -1)
+          if [ -n "$NATIVE_ZIP" ]; then
+            echo "Extracting: $NATIVE_ZIP"
+            unzip -q "$NATIVE_ZIP" -d $HOME/ohos-sdk
+          fi
+        fi
+        
+        # 验证 NDK
+        echo "=== Verifying NDK installation ==="
+        ls -la $HOME/ohos-sdk/
+        find $HOME/ohos-sdk -name "clang" -type f
         
     - name: Download FFTW3
       run: |
@@ -37,12 +67,17 @@ jobs:
     - name: Build FFTW3
       run: |
         cd fftw-3.3.10
+        
+        # 设置 NDK 路径
         export NDK_HOME=$HOME/ohos-sdk/native
         export CC="$NDK_HOME/llvm/bin/clang"
         export CXX="$NDK_HOME/llvm/bin/clang++"
+        export AR="$NDK_HOME/llvm/bin/llvm-ar"
+        export RANLIB="$NDK_HOME/llvm/bin/llvm-ranlib"
         export CFLAGS="-target aarch64-linux-ohos -fPIC -O3"
         export LDFLAGS="-target aarch64-linux-ohos"
         
+        # 配置
         ./configure \
           --host=aarch64-linux-gnu \
           --prefix=$HOME/fftw3-install \
@@ -50,6 +85,7 @@ jobs:
           --enable-float \
           --enable-threads
           
+        # 编译
         make -j$(nproc)
         make install
         
@@ -58,7 +94,9 @@ jobs:
         mkdir -p output
         cp $HOME/fftw3-install/lib/libfftw3f.so output/
         cp $HOME/fftw3-install/include/fftw3.h output/
+        echo "=== Build Results ==="
         ls -lh output/
+        file output/libfftw3f.so
         
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
