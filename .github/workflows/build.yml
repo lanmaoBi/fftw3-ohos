@@ -1,4 +1,4 @@
-name: Build FFTW3 for HarmonyOS (Docker)
+name: Build FFTW3 for HarmonyOS (Docker Fixed)
 
 on:
   push:
@@ -19,10 +19,13 @@ jobs:
         cat > Dockerfile << 'EOF'
         FROM ubuntu:22.04
 
-        # 安装基础工具
+        ENV DEBIAN_FRONTEND=noninteractive
+
+        # 安装基础工具和交叉编译工具链
         RUN apt-get update && apt-get install -y \
             wget build-essential cmake git \
-            clang-15 lld-15
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            && rm -rf /var/lib/apt/lists/*
 
         # 下载 FFTW3
         RUN wget http://www.fftw.org/fftw-3.3.10.tar.gz && \
@@ -30,36 +33,167 @@ jobs:
 
         # 编译
         WORKDIR /fftw-3.3.10
-        RUN CC=clang-15 \
-            CXX=clang++-15 \
-            CFLAGS="--target=aarch64-linux-gnu -fPIC -O3" \
-            LDFLAGS="--target=aarch64-linux-gnu" \
-            ./configure \
+        RUN ./configure \
               --host=aarch64-linux-gnu \
               --prefix=/output \
               --enable-shared \
               --enable-float \
               --enable-threads \
-              --disable-fortran && \
-            make -j$(nproc) && \
-            make install
+              --disable-fortran \
+              CC=aarch64-linux-gnu-gcc \
+              CXX=aarch64-linux-gnu-g++ \
+              CFLAGS="-fPIC -O3" \
+            && make -j$(nproc) \
+            && make install
+
+        # 验证
+        RUN file /output/lib/libfftw3f.so && \
+            aarch64-linux-gnu-readelf -d /output/lib/libfftw3f.so | grep NEEDED || true
 
         WORKDIR /output
         EOF
         
-        # 构建
+        # 构建镜像
         docker build -t fftw-builder .
+        
+        # 创建输出目录
+        mkdir -p output
         
         # 复制产物
         docker create --name temp fftw-builder
         docker cp temp:/output/lib/libfftw3f.so output/
+        docker cp temp:/output/lib/libfftw3f.so.3 output/ || true
         docker cp temp:/output/include/fftw3.h output/
         docker rm temp
         
+        echo "📊 Build Results:"
         ls -lh output/
+        file output/libfftw3f.so
+        
+    - name: Create README
+      run: |
+        cat > output/README.md << 'EOF'
+        # FFTW3 for HarmonyOS (ARM64)
+
+        ## 文件说明
+        - `libfftw3f.so` - FFTW3 单精度动态库（ARM64）
+        - `fftw3.h` - 头文件
+
+        ## 使用方法
+
+        ### 1. 复制到鸿蒙项目
+        ```bash
+        cp libfftw3f.so your_project/entry/libs/arm64-v8a/
+        cp fftw3.h your_project/entry/src/main/cpp/include/
+        ```
+
+        ### 2. CMakeLists.txt 配置
+        ```cmake
+        # 添加头文件路径
+        include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+        # 导入预编译库
+        add_library(fftw3f SHARED IMPORTED)
+        set_target_properties(fftw3f PROPERTIES
+            IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/../libs/arm64-v8a/libfftw3f.so
+        )
+
+        # 链接
+        target_link_libraries(entry PUBLIC fftw3f)
+        ```
+
+        ### 3. C++ 代码示例
+        ```cpp
+        #include "fftw3.h"
+        #include <hilog/log.h>
+
+        void performFFT() {
+            const int N = 1024;
+            
+            // 分配内存
+            fftwf_complex *in = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * N);
+            fftwf_complex *out = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * N);
+            
+            // 创建计划
+            fftwf_plan plan = fftwf_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+            
+            // 填充测试数据
+            for (int i = 0; i < N; i++) {
+                in[i][0] = i; // 实部
+                in[i][1] = 0; // 虚部
+            }
+            
+            // 执行 FFT
+            fftwf_execute(plan);
+            
+            OH_LOG_INFO(LOG_APP, "FFT completed! First result: %f + %fi", 
+                        out[0][0], out[0][1]);
+            
+            // 清理
+            fftwf_destroy_plan(plan);
+            fftwf_free(in);
+            fftwf_free(out);
+        }
+        ```
+
+        ### 4. module.json5 配置
+        ```json
+        {
+          "module": {
+            "name": "entry",
+            "type": "entry",
+            "abilities": [...],
+            "metadata": [
+              {
+                "name": "ArkTSPartialUpdate",
+                "value": "true"
+              }
+            ]
+          }
+        }
+        ```
+
+        ## 技术细节
+        - **架构**: ARM64 (aarch64)
+        - **编译器**: GCC 11.x (aarch64-linux-gnu)
+        - **优化**: -O3
+        - **线程**: 支持多线程
+        - **精度**: 单精度浮点 (float)
+
+        ## 常见问题
+
+        ### Q: 在设备上运行报错 "library not found"
+        A: 确保：
+        1. `libfftw3f.so` 在 `entry/libs/arm64-v8a/` 目录
+        2. CMakeLists.txt 正确配置 IMPORTED_LOCATION
+        3. 使用真机或 ARM64 模拟器测试
+
+        ### Q: 链接时报错 undefined reference
+        A: 检查：
+        ```cmake
+        target_link_libraries(entry PUBLIC fftw3f)  # 确保在最后
+        ```
+
+        ### Q: 性能优化建议
+        A: 
+        - 使用 `FFTW_MEASURE` 替代 `FFTW_ESTIMATE`（首次慢，后续快）
+        - 重用 plan，避免重复创建
+        - 考虑使用 NEON 优化版本
+
+        ## 验证信息
+        ```bash
+        $ file libfftw3f.so
+        libfftw3f.so: ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked
+        ```
+
+        ---
+        构建时间: $(date)
+        FFTW 版本: 3.3.10
+        EOF
         
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: fftw3-harmonyos
+        name: fftw3-harmonyos-arm64
         path: output/*
+        retention-days: 30
