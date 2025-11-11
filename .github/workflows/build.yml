@@ -13,9 +13,18 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     
-    - name: Download OHOS NDK
+    - name: Setup Build Environment
       run: |
-        wget https://repo.huaweicloud.com/openharmony/os/5.0-Release/ohos-sdk-windows_linux-public.tar.gz
+        sudo apt-get update
+        sudo apt-get install -y wget unzip build-essential
+    
+    - name: Download OHOS NDK (Optimized)
+      run: |
+        # 使用 aria2 多线程下载加速
+        sudo apt-get install -y aria2
+        aria2c -x 16 -s 16 https://repo.huaweicloud.com/openharmony/os/5.0-Release/ohos-sdk-windows_linux-public.tar.gz
+        
+        echo "Extracting NDK..."
         tar -xzf ohos-sdk-windows_linux-public.tar.gz
         cd ohos-sdk/linux
         unzip -q native-linux-x64-5.0.0.66-Release.zip -d $HOME/ohos-sdk
