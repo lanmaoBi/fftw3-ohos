@@ -1,0 +1,59 @@
+name: Build FFTW3 for HarmonyOS
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    
+    - name: Download OHOS NDK
+      run: |
+        # 下载鸿蒙 NDK
+        wget https://repo.huaweicloud.com/openharmony/os/5.0-Release/ohos-sdk-windows_linux-public.tar.gz
+        tar -xzf ohos-sdk-windows_linux-public.tar.gz
+        cd ohos-sdk/linux
+        unzip -q native-linux-x64-5.0.0.66-Release.zip -d $HOME/ohos-sdk
+        
+    - name: Download FFTW3
+      run: |
+        wget http://www.fftw.org/fftw-3.3.10.tar.gz
+        tar -xzf fftw-3.3.10.tar.gz
+        
+    - name: Build FFTW3
+      run: |
+        cd fftw-3.3.10
+        export NDK_HOME=$HOME/ohos-sdk/native
+        export CC="$NDK_HOME/llvm/bin/clang"
+        export CXX="$NDK_HOME/llvm/bin/clang++"
+        export CFLAGS="-target aarch64-linux-ohos -fPIC -O3"
+        export LDFLAGS="-target aarch64-linux-ohos"
+        
+        ./configure \
+          --host=aarch64-linux-gnu \
+          --prefix=$HOME/fftw3-install \
+          --enable-shared \
+          --enable-float \
+          --enable-threads
+          
+        make -j$(nproc)
+        make install
+        
+    - name: Package files
+      run: |
+        mkdir -p output
+        cp $HOME/fftw3-install/lib/libfftw3f.so output/
+        cp $HOME/fftw3-install/include/fftw3.h output/
+        ls -lh output/
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: fftw3-harmonyos-arm64
+        path: output/*
