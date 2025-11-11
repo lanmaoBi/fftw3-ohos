@@ -1,4 +1,4 @@
-name: Build FFTW3 for HarmonyOS (Official NDK)
+name: Build FFTW3 for HarmonyOS (Fixed)
 
 on:
   push:
@@ -15,44 +15,78 @@ jobs:
     
     - name: Download OHOS NDK
       run: |
-        # 安装依赖
         sudo apt-get update
-        sudo apt-get install -y wget aria2 unzip
+        sudo apt-get install -y wget aria2 unzip tree
         
-        # 多线程下载 SDK（约 5 分钟）
-        echo "Downloading OHOS SDK..."
+        echo "📥 Downloading OHOS SDK..."
         aria2c -x 16 -s 16 -d /tmp \
           "https://repo.huaweicloud.com/openharmony/os/5.0-Release/ohos-sdk-windows_linux-public.tar.gz"
         
-        # 解压主包
-        echo "Extracting main package..."
+        echo "📦 Extracting main package..."
         mkdir -p /tmp/sdk
         tar -xzf /tmp/ohos-sdk-windows_linux-public.tar.gz -C /tmp/sdk
         
-        # 查找并解压 native SDK
-        echo "Finding native SDK..."
-        NATIVE_SDK=$(find /tmp/sdk -name "native-linux*.zip" | head -1)
+        echo "🔍 Exploring SDK structure..."
+        tree -L 3 /tmp/sdk || find /tmp/sdk -maxdepth 3 -type f -o -type d
+        
+        echo "📦 Finding and extracting native SDK..."
+        NATIVE_SDK=$(find /tmp/sdk -name "native*.zip" -type f | head -1)
         
         if [ -z "$NATIVE_SDK" ]; then
-          echo "ERROR: Native SDK not found!"
+          echo "❌ ERROR: Native SDK not found!"
           echo "Available files:"
-          find /tmp/sdk -type f
+          find /tmp/sdk -type f -name "*.zip"
           exit 1
         fi
         
-        echo "Extracting native SDK: $NATIVE_SDK"
+        echo "✅ Found: $NATIVE_SDK"
+        mkdir -p $HOME/ohos-ndk
         unzip -q "$NATIVE_SDK" -d $HOME/ohos-ndk
         
-        # 验证工具链
-        echo "=== Toolchain verification ==="
-        CLANG_PATH=$(find $HOME/ohos-ndk -name "clang" -type f | grep llvm/bin | head -1)
+        echo "🔍 NDK directory structure:"
+        tree -L 3 $HOME/ohos-ndk || find $HOME/ohos-ndk -maxdepth 3
+        
+        echo "🔎 Searching for clang..."
+        find $HOME/ohos-ndk -name "clang" -type f
+        
+    - name: Setup Toolchain
+      run: |
+        # 查找 clang 的多种可能路径
+        CLANG_PATH=""
+        
+        # 尝试 1: 标准路径
+        if [ -f "$HOME/ohos-ndk/native/llvm/bin/clang" ]; then
+          CLANG_PATH="$HOME/ohos-ndk/native/llvm/bin/clang"
+        # 尝试 2: 直接在 llvm 下
+        elif [ -f "$HOME/ohos-ndk/llvm/bin/clang" ]; then
+          CLANG_PATH="$HOME/ohos-ndk/llvm/bin/clang"
+        # 尝试 3: 搜索整个目录
+        else
+          CLANG_PATH=$(find $HOME/ohos-ndk -name "clang" -type f -path "*/bin/clang" | head -1)
+        fi
+        
         if [ -z "$CLANG_PATH" ]; then
-          echo "ERROR: Clang not found!"
+          echo "❌ ERROR: Clang still not found after extensive search!"
+          echo "Full directory listing:"
+          find $HOME/ohos-ndk -type f | head -50
           exit 1
         fi
         
-        echo "Clang found at: $CLANG_PATH"
+        echo "✅ Clang found: $CLANG_PATH"
+        
+        # 获取工具链根目录
+        NDK_ROOT=$(dirname $(dirname $(dirname $CLANG_PATH)))
+        echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
+        
+        # 验证工具链
+        echo "🔧 Toolchain info:"
         $CLANG_PATH --version
+        
+        # 检查其他工具
+        LLVM_BIN=$(dirname $CLANG_PATH)
+        echo "LLVM_BIN=$LLVM_BIN" >> $GITHUB_ENV
+        
+        ls -la $LLVM_BIN/
         
     - name: Download FFTW3
       run: |
@@ -63,26 +97,21 @@ jobs:
       run: |
         cd fftw-3.3.10
         
-        # 定位工具链
-        NDK_ROOT=$(find $HOME/ohos-ndk -type d -name "llvm" | head -1 | xargs dirname)
+        export CC="$LLVM_BIN/clang"
+        export CXX="$LLVM_BIN/clang++"
+        export AR="$LLVM_BIN/llvm-ar"
+        export RANLIB="$LLVM_BIN/llvm-ranlib"
+        export STRIP="$LLVM_BIN/llvm-strip"
         
-        export CC="$NDK_ROOT/llvm/bin/clang"
-        export CXX="$NDK_ROOT/llvm/bin/clang++"
-        export AR="$NDK_ROOT/llvm/bin/llvm-ar"
-        export RANLIB="$NDK_ROOT/llvm/bin/llvm-ranlib"
-        export STRIP="$NDK_ROOT/llvm/bin/llvm-strip"
-        
-        # 🔑 关键：使用 OHOS 目标
         export CFLAGS="--target=aarch64-linux-ohos -fPIC -O3"
         export CXXFLAGS="--target=aarch64-linux-ohos -fPIC -O3"
         export LDFLAGS="--target=aarch64-linux-ohos"
         
-        echo "=== Build Configuration ==="
+        echo "🔨 Build Configuration:"
         echo "CC: $CC"
+        echo "CXX: $CXX"
         $CC --version
-        echo "Target: aarch64-linux-ohos"
         
-        # 配置
         ./configure \
           --host=aarch64-linux-ohos \
           --prefix=$HOME/fftw3-install \
@@ -91,76 +120,83 @@ jobs:
           --enable-threads \
           --disable-fortran
           
-        # 编译
         make -j$(nproc)
         make install
         
     - name: Verify Build
       run: |
-        echo "=== Verification ==="
+        echo "📊 Build Results:"
         ls -lh $HOME/fftw3-install/lib/
         
-        # 检查库的目标架构
+        echo "🔍 Library info:"
         file $HOME/fftw3-install/lib/libfftw3f.so
         
-        # 检查依赖（应该只依赖系统库）
+        echo "📚 Dependencies:"
         readelf -d $HOME/fftw3-install/lib/libfftw3f.so | grep NEEDED || true
         
     - name: Package files
       run: |
         mkdir -p output
         cp $HOME/fftw3-install/lib/libfftw3f.so output/
-        cp $HOME/fftw3-install/lib/libfftw3f.a output/
+        cp $HOME/fftw3-install/lib/libfftw3f.a output/ 2>/dev/null || true
         cp $HOME/fftw3-install/include/fftw3.h output/
         
-        # 创建使用说明
         cat > output/README.md << 'EOF'
         # FFTW3 for HarmonyOS (ARM64)
-        
+
         ## 文件说明
         - `libfftw3f.so` - 动态库（单精度浮点）
-        - `libfftw3f.a` - 静态库
+        - `libfftw3f.a` - 静态库（如果生成）
         - `fftw3.h` - 头文件
-        
-        ## 使用方法
-        
-        ### 1. 集成到鸿蒙项目
+
+        ## 集成到鸿蒙项目
+
+        ### 1. 复制文件
         ```bash
-        # 复制到项目的 libs/arm64-v8a/ 目录
         cp libfftw3f.so your_project/entry/libs/arm64-v8a/
+        cp fftw3.h your_project/entry/src/main/cpp/include/
         ```
-        
+
         ### 2. 配置 CMakeLists.txt
         ```cmake
+        # 添加预编译库
         add_library(fftw3f SHARED IMPORTED)
         set_target_properties(fftw3f PROPERTIES
             IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/../libs/arm64-v8a/libfftw3f.so
         )
-        target_link_libraries(your_target fftw3f)
+
+        # 链接到你的目标
+        target_link_libraries(entry PUBLIC fftw3f)
         ```
-        
-        ### 3. C++ 代码示例
+
+        ### 3. 使用示例
         ```cpp
-        #include <fftw3.h>
-        
-        // 创建计划
-        fftwf_plan plan = fftwf_plan_dft_1d(1024, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
-        
-        // 执行 FFT
-        fftwf_execute(plan);
-        
-        // 释放
-        fftwf_destroy_plan(plan);
+        #include "fftw3.h"
+
+        void example() {
+            int N = 1024;
+            fftwf_complex *in = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * N);
+            fftwf_complex *out = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * N);
+            
+            fftwf_plan plan = fftwf_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+            fftwf_execute(plan);
+            
+            fftwf_destroy_plan(plan);
+            fftwf_free(in);
+            fftwf_free(out);
+        }
         ```
-        
+
         ## 构建信息
         - Target: aarch64-linux-ohos
-        - Toolchain: OHOS NDK 5.0
-        - Build Date: $(date)
+        - OHOS SDK: 5.0 Release
+        - FFTW Version: 3.3.10
+        - Build Type: Float (single precision)
         EOF
         
-        echo "=== Output Files ==="
+        echo "✅ Package contents:"
         ls -lh output/
+        cat output/README.md
         
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
