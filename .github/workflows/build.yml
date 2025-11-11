@@ -11,11 +11,10 @@ jobs:
     
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     
     - name: Download OHOS NDK
       run: |
-        # 下载鸿蒙 NDK
         wget https://repo.huaweicloud.com/openharmony/os/5.0-Release/ohos-sdk-windows_linux-public.tar.gz
         tar -xzf ohos-sdk-windows_linux-public.tar.gz
         cd ohos-sdk/linux
@@ -53,7 +52,7 @@ jobs:
         ls -lh output/
         
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: fftw3-harmonyos-arm64
         path: output/*
